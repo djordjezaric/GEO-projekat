@@ -1,8 +1,14 @@
 """Deo 1 - Python SQL: kompletna demonstracija.
 
+Pokretanje:  uv run python deo1/main.py
 Redosled: kreiranje seme -> unos podataka -> ucitavanje u DataFrame-ove ->
 CRUD demo -> JOIN/WHERE upiti.
 """
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
 
 from create_schema import main as create_schema
 from crud import demo as crud_demo

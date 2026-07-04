@@ -1,5 +1,9 @@
 """8 upita koji spajaju (JOIN) dve ili vise tabela i filtriraju podatke (WHERE)."""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import pandas as pd
 
 from db import get_engine

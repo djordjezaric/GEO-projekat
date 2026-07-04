@@ -4,8 +4,19 @@ Pokretanje: streamlit run geo_app.py
 Zahtjevi:   geo_download.py mora biti pokrenut bar jednom (preuzima SHP podatke).
 """
 
+import os
+import sys
 import warnings
 from pathlib import Path
+
+# Dodaj root projekta na sys.path da bi 'from db import ...' radio iz podfolder
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Fix PROJ konflikt: rasterio dolazi sa novijom proj.db (v6) nego pyproj (v4).
+_rasterio_proj = Path(sys.executable).parent.parent / "Lib" / "site-packages" / "rasterio" / "proj_data"
+if _rasterio_proj.exists():
+    os.environ["PROJ_LIB"]  = str(_rasterio_proj)
+    os.environ["PROJ_DATA"] = str(_rasterio_proj)
 
 import contextily as ctx
 import folium

@@ -1,5 +1,9 @@
 """Generisko CRUD sa psycopg2 - radi za bilo koju tabelu iz seme."""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 

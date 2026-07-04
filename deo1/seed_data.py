@@ -1,5 +1,9 @@
 """Rucno (hardkodovano) unosenje pocetnih podataka u sve tabele - najmanje 5 redova po tabeli."""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from db import get_connection
 
 INSERT_ZONES = """

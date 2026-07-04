@@ -11,7 +11,7 @@ import geopandas as gpd
 import requests
 from shapely.geometry import box
 
-DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR = Path(__file__).parent.parent / "data"
 SHP_DIR = DATA_DIR / "shp"
 CLIPPED_DIR = DATA_DIR / "clipped"
 
