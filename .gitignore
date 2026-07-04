@@ -1,0 +1,16 @@
+# Okruzenje
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Podaci (SHP fajlovi i zip - previse veliki za git)
+data/
+
+# Kredencijali - NIKAD ne commitovati!
+.env
+
+# IDE
+.vs/
+.idea/
+*.code-workspace
