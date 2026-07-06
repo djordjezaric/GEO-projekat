@@ -182,31 +182,15 @@ def build_sidebar():
     st.sidebar.markdown("---")
     st.sidebar.subheader("Parking (iz baze)")
     show_zones = st.sidebar.checkbox("Parking zone", value=True)
-    show_spots = st.sidebar.checkbox("Parking mjesta", value=True)
 
-    col1, col2, col3 = st.sidebar.columns(3)
-    with col1:
-        free_color  = st.color_picker("Slobodna",   "#00C853", key="free_c")
-    with col2:
-        taken_color = st.color_picker("Zauzeta",    "#D50000", key="taken_c")
-    with col3:
-        other_color = st.color_picker("Ostalo",     "#FF6D00", key="other_c")
-
-    return base_map, layer_cfg, show_zones, show_spots, free_color, taken_color, other_color
+    return base_map, layer_cfg, show_zones
 
 
 # ---------------------------------------------------------------------------
 # Tab 1 — Interaktivna mapa
 # ---------------------------------------------------------------------------
 
-def _spot_color(status: str, free_color: str, taken_color: str, other_color: str) -> str:
-    return {
-        "slobodno":     free_color,
-        "zauzeto":      taken_color,
-    }.get(status, other_color)
-
-
-def render_map(base_map, layer_cfg, show_zones, show_spots, free_color, taken_color, other_color):
+def render_map(base_map, layer_cfg, show_zones):
     m = folium.Map(location=[45.00, 20.20], zoom_start=9, control_scale=True)
 
     # Rasterska podloga
@@ -257,52 +241,51 @@ def render_map(base_map, layer_cfg, show_zones, show_spots, free_color, taken_co
         ).add_to(fg)
         fg.add_to(m)
 
-    # Parking zona iz baze
+    # Parking zone iz baze – jedan marker po zoni
     zones_gdf, spots_gdf = load_parking_data()
 
     if show_zones:
+        # Izracunaj slobodna/zauzeta po zoni
+        zone_stats = {}
+        if not spots_gdf.empty:
+            for zid, grp in spots_gdf.groupby("zone_id"):
+                zone_stats[zid] = {
+                    "slobodno": int((grp["status"] == "slobodno").sum()),
+                    "ukupno":   len(grp),
+                }
+
         fg_z = folium.FeatureGroup(name="Parking zone (baza)", show=True)
         for _, row in zones_gdf.iterrows():
             if row.geometry is None:
                 continue
+            stats    = zone_stats.get(row["zone_id"], {})
+            slobodno = stats.get("slobodno", "?")
+            ukupno   = stats.get("ukupno",   row["total_capacity"])
+
+            # Boja markera po popunjenosti
+            if isinstance(slobodno, int) and isinstance(ukupno, int) and ukupno > 0:
+                pct_free = slobodno / ukupno
+                marker_color = "green" if pct_free > 0.5 else ("orange" if pct_free > 0.2 else "red")
+            else:
+                marker_color = "blue"
+
+            popup_html = (
+                f"<div style='font-family:sans-serif;font-size:15px;min-width:160px;text-align:center'>"
+                f"<b style='font-size:22px'>{slobodno}</b> / {ukupno}<br>"
+                f"<span style='color:#555'>slobodnih mjesta</span><br>"
+                f"<hr style='margin:6px 0'>"
+                f"💰 {row['hourly_rate']} din/h &nbsp;|&nbsp; "
+                f"🏠 {'Natkriveno' if row['has_covered_spots'] else 'Otvoreno'}"
+                f"</div>"
+            )
+
             folium.Marker(
                 location=[row.geometry.y, row.geometry.x],
-                icon=folium.Icon(color="blue", icon="home", prefix="fa"),
-                tooltip=row["name"],
-                popup=folium.Popup(
-                    f"<b>{row['name']}</b><br>"
-                    f"Grad: {row['city']}<br>"
-                    f"Kapacitet: {row['total_capacity']}<br>"
-                    f"Cijena/h: {row['hourly_rate']} din<br>"
-                    f"Natkriveno: {'Da' if row['has_covered_spots'] else 'Ne'}",
-                    max_width=220,
-                ),
+                icon=folium.Icon(color=marker_color, icon="car", prefix="fa"),
+                tooltip=f"{slobodno} slobodnih / {ukupno} ukupno",
+                popup=folium.Popup(popup_html, max_width=200),
             ).add_to(fg_z)
         fg_z.add_to(m)
-
-    if show_spots and not spots_gdf.empty:
-        fg_s = folium.FeatureGroup(name="Parking mjesta (baza)", show=True)
-        for _, row in spots_gdf.iterrows():
-            c = _spot_color(row["status"], free_color, taken_color, other_color)
-            folium.CircleMarker(
-                location=[row.geometry.y, row.geometry.x],
-                radius=9,
-                color=c,
-                fill=True,
-                fill_color=c,
-                fill_opacity=0.85,
-                tooltip=f"{row['spot_number']} — {row['status']}",
-                popup=folium.Popup(
-                    f"<b>Mjesta {row['spot_number']}</b><br>"
-                    f"Zona: {row['zone_name']}<br>"
-                    f"Grad: {row['city']}<br>"
-                    f"Tip: {row['spot_type']}<br>"
-                    f"Natkriveno: {'Da' if row['is_covered'] else 'Ne'}<br>"
-                    f"Status: <b>{row['status']}</b>",
-                    max_width=220,
-                ),
-            ).add_to(fg_s)
-        fg_s.add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
     st_folium(m, use_container_width=True, height=580, returned_objects=[])
@@ -741,7 +724,7 @@ def main():
         return
 
     # Sidebar
-    base_map, layer_cfg, show_zones, show_spots, free_color, taken_color, other_color = build_sidebar()
+    base_map, layer_cfg, show_zones = build_sidebar()
 
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(
@@ -749,7 +732,7 @@ def main():
     )
 
     with tab1:
-        render_map(base_map, layer_cfg, show_zones, show_spots, free_color, taken_color, other_color)
+        render_map(base_map, layer_cfg, show_zones)
 
     with tab2:
         render_overlay()
