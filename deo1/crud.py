@@ -8,7 +8,7 @@ from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
 from db import get_connection
-
+source .venv/Scripts/activate
 
 def read_all(table: str, order_by: str | None = None) -> list[dict]:
     query = sql.SQL("SELECT * FROM {table}").format(table=sql.Identifier(table))
