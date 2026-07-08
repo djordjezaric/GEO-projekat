@@ -18,17 +18,15 @@ if _rasterio_proj.exists():
     os.environ["PROJ_LIB"]  = str(_rasterio_proj)
     os.environ["PROJ_DATA"] = str(_rasterio_proj)
 
-import contextily as ctx
 import folium
 import geopandas as gpd
-import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 from shapely.geometry import Point, box
 from streamlit_folium import st_folium
 
 from db import get_engine
-from geo_download import CLIPPED_DIR, AOI_BBOX, main as download_data
+from geo_download import CLIPPED_DIR, main as download_data
 
 warnings.filterwarnings("ignore")
 
@@ -295,19 +293,68 @@ def render_map(base_map, layer_cfg, show_zones):
 # Tab 2 — Overlay Analize (6 tehnika)
 # ---------------------------------------------------------------------------
 
-def _basemap(ax, crs_str: str) -> None:
-    try:
-        ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik, crs=crs_str)
-    except Exception:
-        pass  # Ako internet nije dostupan, plot ostaje bez podloge
+
+def _folium_overlay_map(layers, map_key, height=500):
+    """Helper: prikazuje interaktivnu Folium mapu sa više GeoDataFrame slojeva."""
+    sw = ne = None
+    for gdf, *_ in layers:
+        if gdf is None or gdf.empty:
+            continue
+        g4 = gdf.to_crs("EPSG:4326") if gdf.crs and gdf.crs.to_epsg() != 4326 else gdf
+        b = g4.total_bounds
+        if sw is None:
+            sw = [b[1], b[0]]
+            ne = [b[3], b[2]]
+        else:
+            sw = [min(sw[0], b[1]), min(sw[1], b[0])]
+            ne = [max(ne[0], b[3]), max(ne[1], b[2])]
+
+    m = folium.Map(tiles="CartoDB positron", control_scale=True)
+
+    for gdf, fill, stroke, opacity, name in layers:
+        if gdf is None or gdf.empty:
+            continue
+        g4 = gdf.to_crs("EPSG:4326") if gdf.crs and gdf.crs.to_epsg() != 4326 else gdf
+        if len(g4) > 2000:
+            g4 = g4.sample(2000, random_state=42)
+        g4 = g4[["geometry"]]  # odbaci ne-serijalizabilne kolone (Timestamp, itd.)
+        valid = g4.geometry.dropna()
+        if valid.empty:
+            continue
+        gt = valid.geom_type.iloc[0]
+
+        if "Point" in gt:
+            folium.GeoJson(
+                g4.__geo_interface__, name=name,
+                marker=folium.CircleMarker(
+                    radius=6, color=stroke, fill=True,
+                    fill_color=fill, fill_opacity=opacity, weight=1,
+                ),
+            ).add_to(m)
+        elif "Line" in gt:
+            folium.GeoJson(
+                g4.__geo_interface__, name=name,
+                style_function=lambda f, _s=stroke, _o=opacity: {
+                    "color": _s, "weight": 2.5, "opacity": _o,
+                },
+            ).add_to(m)
+        else:
+            folium.GeoJson(
+                g4.__geo_interface__, name=name,
+                style_function=lambda f, _f=fill, _s=stroke, _o=opacity: {
+                    "fillColor": _f, "color": _s, "weight": 1.5, "fillOpacity": _o,
+                },
+            ).add_to(m)
+
+    if sw and ne:
+        m.fit_bounds([sw, ne])
+    folium.LayerControl(collapsed=False).add_to(m)
+    st_folium(m, use_container_width=True, height=height, returned_objects=[], key=map_key)
 
 
 def render_overlay():
     st.header("⬡ Overlay Tehnike")
-    st.info(
-        "6 prostornih overlay operacija nad parking podacima. "
-        "Rasterska podloga: OpenStreetMap tiles via **contextily**."
-    )
+    st.info("6 prostornih overlay operacija nad parking podacima. Sve mape su interaktivne — možeš zumirati i pomjerati.")
 
     zones_gdf, spots_gdf = load_parking_data()
     if spots_gdf.empty:
@@ -317,89 +364,110 @@ def render_overlay():
     roads_gdf   = load_shp_layer("Putevi")
     landuse_gdf = load_shp_layer("Namena zemljista")
 
-    spots_3857  = spots_gdf.to_crs("EPSG:3857")
-    CRS_STR     = "EPSG:3857"
+    spots_3857 = spots_gdf.to_crs("EPSG:3857")
+    CRS_3857   = "EPSG:3857"
 
-    # --- 1. Buffer ---
-    st.subheader("1. Buffer — zona uticaja 400 m oko parking mjesta")
     buf400 = spots_3857.copy()
     buf400["geometry"] = spots_3857.buffer(400)
     buf_union = buf400.dissolve()
 
-    fig, ax = plt.subplots(figsize=(11, 6))
-    buf400.plot(ax=ax, alpha=0.25, color="#1565C0", label="Buffer 400 m")
-    spots_3857.plot(ax=ax, color="#D50000", markersize=12, zorder=5, label="Parking mjesta")
-    _basemap(ax, CRS_STR)
-    ax.set_title("Buffer 400 m oko parking mjesta (PostGIS + GeoPandas)")
-    ax.legend(); ax.set_axis_off()
-    st.pyplot(fig); plt.close()
-    st.caption(f"Ukupno {len(buf400)} buffer zona; area union = {buf_union.geometry.area.iloc[0]/1e6:.4f} km²")
+    # --- 1. Buffer ---
+    st.subheader("1. Buffer — zona uticaja 400 m oko parking mjesta")
+    _folium_overlay_map([
+        (buf400,     "#1565C0", "#1565C0", 0.25, "Buffer 400 m"),
+        (spots_3857, "#D50000", "#D50000", 0.9,  "Parking mjesta"),
+    ], "buf1")
+    st.caption(f"Ukupno {len(buf400)} buffer zona; ukupna površina uniona = {buf_union.geometry.area.iloc[0]/1e6:.4f} km²")
 
-    # --- 2. Clip — putevi isjeceni na buffer zonu ---
+    # --- 2. Clip ---
     st.subheader("2. Clip — putevi unutar 400 m od parking mjesta")
     if not roads_gdf.empty:
         try:
-            roads_3857 = roads_gdf.to_crs(CRS_STR)
-            major = roads_3857[roads_3857["fclass"].isin(MAJOR_ROAD_CLASSES)] if "fclass" in roads_3857.columns else roads_3857
+            roads_3857    = roads_gdf.to_crs(CRS_3857)
+            major         = roads_3857[roads_3857["fclass"].isin(MAJOR_ROAD_CLASSES)] if "fclass" in roads_3857.columns else roads_3857
             clipped_roads = gpd.clip(major, buf_union)
-            fig, ax = plt.subplots(figsize=(11, 6))
-            buf_union.plot(ax=ax, alpha=0.2, color="#1565C0", label="Buffer zona")
-            clipped_roads.plot(ax=ax, color="#B71C1C", linewidth=1.2, label=f"Putevi u zoni ({len(clipped_roads)})")
-            spots_3857.plot(ax=ax, color="#F9A825", markersize=12, zorder=5)
-            _basemap(ax, CRS_STR)
-            ax.set_title("Clip: Putevi (main roads) isjeceni na parking buffer zonu")
-            ax.legend(); ax.set_axis_off()
-            st.pyplot(fig); plt.close()
-            st.caption(f"Isjeceno {len(clipped_roads)} segmenata puta.")
+            _folium_overlay_map([
+                (buf_union,     "#1565C0", "#1565C0", 0.2,  "Buffer zona"),
+                (clipped_roads, "#B71C1C", "#B71C1C", 0.85, f"Putevi u zoni ({len(clipped_roads)})"),
+                (spots_3857,    "#F9A825", "#F9A825", 0.9,  "Parking"),
+            ], "clip2")
+            st.caption(f"Isječeno {len(clipped_roads)} segmenata puta unutar 400 m od parking mjesta.")
         except Exception as e:
             st.warning(f"Clip greška: {e}")
     else:
         st.info("Nema SHP podataka o putevima. Pokrenite geo_download.py.")
 
-    # --- 3. Intersection (overlay) — presjek buffer zone i namjene zemljista ---
+    # --- 3. Intersection ---
     st.subheader("3. Intersection — presjek buffer zone sa namjenom zemljista")
     if not landuse_gdf.empty:
         try:
-            landuse_3857 = landuse_gdf.to_crs(CRS_STR)
+            landuse_3857 = landuse_gdf.to_crs(CRS_3857)
             intersection = gpd.overlay(
                 buf_union[["geometry"]], landuse_3857[["fclass", "geometry"]], how="intersection"
             )
-            fig, ax = plt.subplots(figsize=(11, 6))
-            intersection.plot(
-                ax=ax, column="fclass", legend=True, alpha=0.6,
-                legend_kwds={"loc": "upper right", "fontsize": 7},
-            )
-            spots_3857.plot(ax=ax, color="black", markersize=10, zorder=5)
-            _basemap(ax, CRS_STR)
-            ax.set_title("Intersection: Namjena zemljista unutar 400 m od parking mjesta")
-            ax.set_axis_off()
-            st.pyplot(fig); plt.close()
+            palette      = ["#E53935", "#43A047", "#1E88E5", "#FB8C00", "#8E24AA", "#00ACC1", "#F4511E", "#6D4C41"]
+            fclasses     = list(intersection["fclass"].unique()) if "fclass" in intersection.columns else []
+            fclass_color = {fc: palette[i % len(palette)] for i, fc in enumerate(fclasses)}
 
+            m = folium.Map(tiles="CartoDB positron", control_scale=True)
+            buf4326 = buf_union[["geometry"]].to_crs("EPSG:4326")
+            folium.GeoJson(
+                buf4326.__geo_interface__, name="Buffer zona",
+                style_function=lambda f: {"fillColor": "#1565C0", "color": "#1565C0", "weight": 1, "fillOpacity": 0.1}
+            ).add_to(m)
+            if "fclass" in intersection.columns:
+                inter4326 = intersection.to_crs("EPSG:4326")
+                for fc in fclasses:
+                    sub = inter4326[inter4326["fclass"] == fc]
+                    c   = fclass_color[fc]
+                    folium.GeoJson(
+                        sub.__geo_interface__, name=fc,
+                        style_function=lambda f, _c=c: {"fillColor": _c, "color": _c, "weight": 1, "fillOpacity": 0.55}
+                    ).add_to(m)
+            folium.GeoJson(
+                spots_gdf[["geometry"]].__geo_interface__, name="Parking mjesta",
+                marker=folium.CircleMarker(radius=5, color="black", fill=True, fill_color="black", fill_opacity=0.9, weight=1)
+            ).add_to(m)
+            b = buf4326.total_bounds
+            m.fit_bounds([[b[1], b[0]], [b[3], b[2]]])
+            folium.LayerControl(collapsed=False).add_to(m)
+            st_folium(m, use_container_width=True, height=500, returned_objects=[], key="inter3")
             if "fclass" in intersection.columns:
                 counts = intersection["fclass"].value_counts().reset_index()
-                counts.columns = ["Namjena", "Broj podrucja"]
+                counts.columns = ["Namjena", "Broj područja"]
                 st.dataframe(counts)
         except Exception as e:
             st.warning(f"Intersection greška: {e}")
     else:
         st.info("Nema SHP podataka o namjeni zemljista. Pokrenite geo_download.py.")
 
-    # --- 4. Union (dissolve) — spajanje buffer zona po gradu ---
+    # --- 4. Union/Dissolve ---
     st.subheader("4. Union / Dissolve — parking pokrivanje po gradu")
     try:
         buf_city = spots_3857.copy()
-        buf_city["geometry"] = spots_3857.buffer(300)
-        city_col = spots_gdf["city"].values
-        buf_city["city"] = city_col
+        buf_city["geometry"] = spots_3857.buffer(800)
+        buf_city["city"]     = spots_gdf["city"].values
         city_union = buf_city.dissolve(by="city").reset_index()
 
-        fig, ax = plt.subplots(figsize=(11, 6))
-        city_union.plot(ax=ax, column="city", legend=True, alpha=0.45, cmap="Set2")
-        spots_3857.plot(ax=ax, color="black", markersize=10, zorder=5, label="Parking mjesta")
-        _basemap(ax, CRS_STR)
-        ax.set_title("Dissolve (Union): Parking buffer zone po gradu")
-        ax.legend(); ax.set_axis_off()
-        st.pyplot(fig); plt.close()
+        city_colors = {"Beograd": "#1565C0", "Novi Sad": "#2E7D32", "Nis": "#B71C1C"}
+        m = folium.Map(tiles="CartoDB positron", control_scale=True)
+        city4326 = city_union.to_crs("EPSG:4326")
+        for _, row in city4326.iterrows():
+            city  = row["city"]
+            c     = city_colors.get(city, "#555555")
+            r_gdf = gpd.GeoDataFrame([row], crs="EPSG:4326")[["geometry"]]
+            folium.GeoJson(
+                r_gdf.__geo_interface__, name=city,
+                style_function=lambda f, _c=c: {"fillColor": _c, "color": _c, "weight": 1.5, "fillOpacity": 0.45}
+            ).add_to(m)
+        folium.GeoJson(
+            spots_gdf[["geometry"]].__geo_interface__, name="Parking mjesta",
+            marker=folium.CircleMarker(radius=5, color="black", fill=True, fill_color="black", fill_opacity=0.9, weight=1)
+        ).add_to(m)
+        b = city4326.total_bounds
+        m.fit_bounds([[b[1], b[0]], [b[3], b[2]]])
+        folium.LayerControl(collapsed=False).add_to(m)
+        st_folium(m, use_container_width=True, height=500, returned_objects=[], key="union4")
 
         area_df = city_union[["city", "geometry"]].copy()
         area_df["povrsina_km2"] = area_df.geometry.area / 1e6
@@ -407,69 +475,67 @@ def render_overlay():
     except Exception as e:
         st.warning(f"Union greška: {e}")
 
-    # --- 5. Difference — AOI minus parking buffer ---
-    st.subheader("5. Difference — oblast bez parking pokrivenosti (500 m)")
+    # --- 5. Difference ---
+    st.subheader("5. Difference — Beograd: oblasti bez parking pokrivenosti (500 m)")
     try:
-        aoi_gdf = gpd.GeoDataFrame(geometry=[box(*AOI_BBOX)], crs="EPSG:4326").to_crs(CRS_STR)
-        buf500   = spots_3857.copy()
-        buf500["geometry"] = spots_3857.buffer(500)
-        buf500_union = buf500.dissolve()
-        diff = gpd.overlay(aoi_gdf[["geometry"]], buf500_union[["geometry"]], how="difference")
-
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        buf500_union.plot(ax=axes[0], alpha=0.5, color="#1565C0", label="Parking buffer 500 m")
-        spots_3857.plot(ax=axes[0], color="red", markersize=12, zorder=5)
-        _basemap(axes[0], CRS_STR)
-        axes[0].set_title("Parking buffer zona (500 m)"); axes[0].set_axis_off()
-
-        diff.plot(ax=axes[1], alpha=0.5, color="#757575", label="Bez parkinga")
-        buf500_union.plot(ax=axes[1], alpha=0.3, color="#1565C0")
-        _basemap(axes[1], CRS_STR)
-        axes[1].set_title("Difference: Oblast AOI bez parking pokrivenosti")
-        axes[1].set_axis_off()
-
-        plt.tight_layout()
-        st.pyplot(fig); plt.close()
-
-        total_area  = aoi_gdf.geometry.area.sum()
-        park_area   = buf500_union.geometry.area.sum()
-        diff_area   = diff.geometry.area.sum()
+        BG_BBOX      = (20.25, 44.70, 20.65, 44.95)
+        aoi_gdf      = gpd.GeoDataFrame(geometry=[box(*BG_BBOX)], crs="EPSG:4326").to_crs(CRS_3857)
+        bg_spots     = spots_3857[spots_gdf["city"].values == "Beograd"]
+        buf500       = bg_spots.copy()
+        buf500["geometry"] = bg_spots.buffer(500)
+        buf500_union = buf500[["geometry"]].dissolve()
+        diff         = gpd.overlay(aoi_gdf[["geometry"]], buf500_union[["geometry"]], how="difference")
+        _folium_overlay_map([
+            (diff,         "#757575", "#555555", 0.5,  "Bez parkinga"),
+            (buf500_union, "#1565C0", "#1565C0", 0.35, "Parking buffer 500 m"),
+            (bg_spots,     "#D50000", "#D50000", 0.9,  "Parking mjesta (BG)"),
+        ], "diff5")
+        total_area = aoi_gdf.geometry.area.sum()
+        park_area  = buf500_union.geometry.area.sum()
+        diff_area  = diff.geometry.area.sum()
         st.caption(
-            f"AOI: {total_area/1e6:.1f} km² | "
+            f"AOI Beograd: {total_area/1e6:.1f} km² | "
             f"Parking pokrivenost: {park_area/1e6:.4f} km² ({park_area/total_area*100:.2f}%) | "
             f"Bez parkinga: {diff_area/1e6:.1f} km²"
         )
     except Exception as e:
         st.warning(f"Difference greška: {e}")
 
-    # --- 6. Symmetric Difference — NS vs BG ---
-    st.subheader("6. Symmetric Difference — parking zone Novi Sad vs Beograd")
+    # --- 6. Symmetric Difference ---
+    st.subheader("6. Symmetric Difference — dvije susjedne zone u Beogradu")
     try:
-        cities_present = spots_gdf["city"].unique()
-        ns = spots_3857[spots_gdf["city"].values == "Novi Sad"]
-        bg = spots_3857[spots_gdf["city"].values == "Beograd"]
-
-        if ns.empty or bg.empty:
-            st.info("Nema podataka za oba grada (trebaju Novi Sad i Beograd).")
+        bg_spots = spots_gdf[spots_gdf["city"] == "Beograd"]
+        if bg_spots["zone_name"].nunique() < 2:
+            st.info("Nedovoljno zona u Beogradu za prikaz.")
         else:
-            ns_buf = ns.copy(); ns_buf["geometry"] = ns.buffer(600)
-            bg_buf = bg.copy(); bg_buf["geometry"] = bg.buffer(600)
-            ns_union = ns_buf.dissolve()[["geometry"]]
-            bg_union = bg_buf.dissolve()[["geometry"]]
+            zone_names = bg_spots["zone_name"].unique()[:2]
+            za_name, zb_name = zone_names[0], zone_names[1]
 
-            sym_diff = gpd.overlay(ns_union, bg_union, how="symmetric_difference")
-            union_all = gpd.overlay(ns_union, bg_union, how="union")
+            za = bg_spots[bg_spots["zone_name"] == za_name].to_crs("EPSG:3857")
+            zb = bg_spots[bg_spots["zone_name"] == zb_name].to_crs("EPSG:3857")
 
-            fig, ax = plt.subplots(figsize=(11, 6))
-            union_all.plot(ax=ax, alpha=0.15, color="purple")
-            ns_union.plot(ax=ax, alpha=0.4, color="blue", label="Novi Sad buffer")
-            bg_union.plot(ax=ax, alpha=0.4, color="red",  label="Beograd buffer")
-            sym_diff.plot(ax=ax, alpha=0.6, color="purple", label="Sym. Diff (ekskluzivno)")
-            spots_3857.plot(ax=ax, color="black", markersize=10, zorder=5)
-            _basemap(ax, CRS_STR)
-            ax.set_title("Symmetric Difference: parking zone Novi Sad XOR Beograd")
-            ax.legend(); ax.set_axis_off()
-            st.pyplot(fig); plt.close()
+            buf_a = za.copy(); buf_a["geometry"] = za.buffer(1500)
+            buf_b = zb.copy(); buf_b["geometry"] = zb.buffer(1500)
+
+            union_a  = buf_a[["geometry"]].dissolve()
+            union_b  = buf_b[["geometry"]].dissolve()
+            sym_diff = gpd.overlay(union_a, union_b, how="symmetric_difference")
+            inter_ab = gpd.overlay(union_a, union_b, how="intersection")
+
+            _folium_overlay_map([
+                (union_a,                    "#1565C0", "#1565C0", 0.25, f"{za_name} buffer"),
+                (union_b,                    "#B71C1C", "#B71C1C", 0.25, f"{zb_name} buffer"),
+                (inter_ab,                   "#F9A825", "#F9A825", 0.6,  "Presjek (isključen)"),
+                (sym_diff,                   "#7B1FA2", "#7B1FA2", 0.5,  "Sym. Diff (ekskluzivno)"),
+                (pd.concat([za, zb]),        "black",   "black",   0.9,  "Parking mjesta"),
+            ], "symdiff6")
+
+            st.caption(
+                f"Plavo = isključivo {za_name} | "
+                f"Crveno = isključivo {zb_name} | "
+                f"Žuto = presjek (ovaj dio je ISKLJUČEN iz sym. diff) | "
+                f"Ljubičasto = sym. diff rezultat"
+            )
     except Exception as e:
         st.warning(f"Symmetric difference greška: {e}")
 
@@ -509,18 +575,6 @@ def render_spatial_queries():
             if not pois_within.empty:
                 show_cols = [c for c in ["name", "fclass"] if c in pois_within.columns]
                 st.dataframe(pois_within[show_cols].head(30))
-
-                pois_3857    = pois_gdf.to_crs(CRS_STR)
-                within_3857  = pois_within.to_crs(CRS_STR)
-                fig, ax = plt.subplots(figsize=(11, 6))
-                buf_union_3857.plot(ax=ax, alpha=0.2, color="#1565C0")
-                pois_3857.plot(ax=ax, color="gray", markersize=2, alpha=0.4, label="Svi POI")
-                within_3857.plot(ax=ax, color="red", markersize=8, zorder=5, label=f"Within ({len(within_3857)})")
-                spots_3857.plot(ax=ax, color="#00C853", markersize=10, zorder=6, label="Parking")
-                _basemap(ax, CRS_STR)
-                ax.set_title("Within: POI unutar 400 m od parking mjesta")
-                ax.legend(); ax.set_axis_off()
-                st.pyplot(fig); plt.close()
         except Exception as e:
             st.warning(f"Within greška: {e}")
     else:
@@ -532,19 +586,7 @@ def render_spatial_queries():
         try:
             mask = roads_gdf.intersects(buf_geom_4326)
             roads_int = roads_gdf[mask]
-            roads_3857 = roads_gdf.to_crs(CRS_STR)
-            roads_int_3857 = roads_int.to_crs(CRS_STR)
             st.success(f"Pronađeno {len(roads_int)} segmenata puta koji se sijeku sa parking buffer zonom.")
-
-            fig, ax = plt.subplots(figsize=(11, 6))
-            buf_union_3857.plot(ax=ax, alpha=0.2, color="#1565C0")
-            roads_3857.plot(ax=ax, color="lightgray", linewidth=0.4, alpha=0.5, label="Ostali putevi")
-            roads_int_3857.plot(ax=ax, color="#D50000", linewidth=1.5, label=f"Sijeku parking ({len(roads_int_3857)})")
-            spots_3857.plot(ax=ax, color="#00C853", markersize=10, zorder=5)
-            _basemap(ax, CRS_STR)
-            ax.set_title("Intersects: Putevi koji sijeku parking buffer zonu (400 m)")
-            ax.legend(); ax.set_axis_off()
-            st.pyplot(fig); plt.close()
         except Exception as e:
             st.warning(f"Intersects greška: {e}")
 
@@ -554,19 +596,7 @@ def render_spatial_queries():
         try:
             mask = buildings_gdf.intersects(buf_geom_4326)
             bld_in_zone = buildings_gdf[mask]
-            bld_3857    = buildings_gdf.to_crs(CRS_STR)
-            bld_in_3857 = bld_in_zone.to_crs(CRS_STR)
             st.success(f"Pronađeno {len(bld_in_zone)} zgrada koje se sijeku / preklapaju sa parking buffer zonom.")
-
-            fig, ax = plt.subplots(figsize=(11, 6))
-            buf_union_3857.plot(ax=ax, alpha=0.15, color="#1565C0")
-            bld_3857.plot(ax=ax, color="lightgray", alpha=0.3, label="Sve zgrade")
-            bld_in_3857.plot(ax=ax, color="#BF360C", alpha=0.6, label=f"U parking zoni ({len(bld_in_3857)})")
-            spots_3857.plot(ax=ax, color="#00C853", markersize=10, zorder=5)
-            _basemap(ax, CRS_STR)
-            ax.set_title("Overlaps/Intersects: Zgrade u parking buffer zoni (400 m)")
-            ax.legend(); ax.set_axis_off()
-            st.pyplot(fig); plt.close()
         except Exception as e:
             st.warning(f"Overlaps greška: {e}")
     else:
@@ -613,21 +643,6 @@ def render_spatial_queries():
         st.success(f"Pronađeno {len(free_within)} slobodnih parking mjesta unutar 2 km od centra Novog Sada.")
         disp = free_within[["spot_number", "zone_name", "spot_type", "is_covered", "status"]].copy()
         st.dataframe(disp)
-
-        # Vizualizacija
-        ns_buf_3857 = (
-            gpd.GeoDataFrame(geometry=[ns_center_3857.buffer(2000)], crs="EPSG:3857")
-        )
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ns_buf_3857.plot(ax=ax, alpha=0.15, color="blue", label="2 km od centra NS")
-        spots_3857.plot(ax=ax, color="gray", markersize=8, alpha=0.5, label="Sva mjesta")
-        free_within_3857 = free_within.to_crs("EPSG:3857")
-        if not free_within_3857.empty:
-            free_within_3857.plot(ax=ax, color="#00C853", markersize=14, zorder=5, label=f"Slobodna u radijusu ({len(free_within_3857)})")
-        _basemap(ax, "EPSG:3857")
-        ax.set_title("Distance query: Slobodna parking mjesta unutar 2 km od centra Novog Sada")
-        ax.legend(); ax.set_axis_off()
-        st.pyplot(fig); plt.close()
     except Exception as e:
         st.warning(f"Distance query greška: {e}")
 
