@@ -22,13 +22,9 @@ if _rasterio_proj.exists():
 import numpy as np
 import cv2
 import pandas as pd
-import geopandas as gpd
 import folium
-import matplotlib.pyplot as plt
 import streamlit as st
 from streamlit_folium import st_folium
-from shapely.geometry import Point
-from sklearn.cluster import DBSCAN
 
 from psycopg2 import sql
 from db import get_engine, get_connection
@@ -268,140 +264,6 @@ def build_overview_map(df: pd.DataFrame) -> folium.Map:
 
     return m
 
-# ── Prostorne analize ──────────────────────────────────────────────────────────
-
-def run_spatial_analyses(df: pd.DataFrame, db_spots: pd.DataFrame):
-    st.subheader("Prostorne analize")
-
-    if df.empty or df["lat"].isna().all():
-        st.info("Pokrenite detekciju i sačuvajte rezultate da biste vidjeli analize.")
-        return
-
-    gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df["lon"], df["lat"]),
-                           crs="EPSG:4326").to_crs("EPSG:3857")
-    gdf_free = gdf[gdf["status"] == "slobodno"]
-    gdf_occ  = gdf[gdf["status"] == "zauzeto"]
-
-    # 1 ── Buffer 30 m oko slobodnih mjesta
-    with st.expander("1. Buffer zona (30 m) oko slobodnih mjesta", expanded=True):
-        if gdf_free.empty:
-            st.info("Nema slobodnih mjesta.")
-        else:
-            buf = gdf_free.copy()
-            buf["geometry"] = buf.geometry.buffer(30)
-            fig, ax = plt.subplots(figsize=(8, 5))
-            try:
-                import contextily as ctx
-                gdf_occ.plot(ax=ax, color="red",   markersize=60, label="Zauzeto", zorder=4)
-                gdf_free.plot(ax=ax, color="green", markersize=60, label="Slobodno", zorder=4)
-                buf.plot(ax=ax, color="green", alpha=0.2, edgecolor="green", zorder=3)
-                ctx.add_basemap(ax, crs="EPSG:3857",
-                                source=ctx.providers.CartoDB.Positron, zoom=16)
-            except Exception:
-                gdf_occ.plot(ax=ax, color="red",   markersize=60, label="Zauzeto")
-                gdf_free.plot(ax=ax, color="green", markersize=60, label="Slobodno")
-                buf.plot(ax=ax, color="green", alpha=0.2, edgecolor="green")
-            ax.legend()
-            ax.set_axis_off()
-            ax.set_title("Buffer 30 m oko slobodnih parking mjesta")
-            st.pyplot(fig)
-            plt.close(fig)
-
-    # 2 ── Udio slobodnih vs zauzeto (pie chart)
-    with st.expander("2. Udio slobodnih vs. zauzetih mjesta"):
-        counts = df["status"].value_counts()
-        fig, ax = plt.subplots(figsize=(5, 5))
-        colors  = ["#00cc00" if s == "slobodno" else "#cc0000" for s in counts.index]
-        ax.pie(counts.values, labels=counts.index, colors=colors,
-               autopct="%1.0f%%", startangle=90,
-               textprops={"fontsize": 13})
-        ax.set_title("Slobodna vs. zauzeta mjesta")
-        st.pyplot(fig)
-        plt.close(fig)
-
-    # 3 ── DBSCAN po zonama
-    with st.expander("3. DBSCAN klasterovanje mjesta"):
-        coords = np.column_stack([gdf.geometry.x, gdf.geometry.y])
-        if len(coords) >= 3:
-            db    = DBSCAN(eps=80, min_samples=2).fit(coords)
-            gdf2  = gdf.copy()
-            gdf2["cluster"] = db.labels_
-            n_cl  = len(set(db.labels_)) - (1 if -1 in db.labels_ else 0)
-            fig, ax = plt.subplots(figsize=(8, 5))
-            try:
-                import contextily as ctx
-                gdf2.plot(column="cluster", ax=ax, legend=True,
-                          markersize=70, cmap="tab10", zorder=3)
-                ctx.add_basemap(ax, crs="EPSG:3857",
-                                source=ctx.providers.CartoDB.Positron, zoom=15)
-            except Exception:
-                gdf2.plot(column="cluster", ax=ax, legend=True,
-                          markersize=70, cmap="tab10")
-            ax.set_axis_off()
-            ax.set_title(f"DBSCAN – {n_cl} klastera")
-            st.pyplot(fig)
-            plt.close(fig)
-        else:
-            st.info("Potrebne su najmanje 3 detekcije za klasterovanje.")
-
-    # 4 ── Poredjenje ML slobodnih vs DB slobodnih mjesta
-    with st.expander("4. ML slobodna mjesta vs. DB parking mjesta"):
-        if db_spots.empty:
-            st.info("Nema DB parking mjesta.")
-        else:
-            gdf_db = gpd.GeoDataFrame(
-                db_spots, geometry=gpd.points_from_xy(db_spots["lon"], db_spots["lat"]),
-                crs="EPSG:4326",
-            ).to_crs("EPSG:3857")
-            fig, ax = plt.subplots(figsize=(8, 5))
-            try:
-                import contextily as ctx
-                if not gdf_free.empty:
-                    gdf_free.plot(ax=ax, color="green", markersize=80,
-                                  label="ML slobodna", zorder=5)
-                gdf_db.plot(ax=ax, color="blue", markersize=40, marker="s",
-                            label="DB mjesta", zorder=4)
-                ctx.add_basemap(ax, crs="EPSG:3857",
-                                source=ctx.providers.CartoDB.Positron, zoom=14)
-            except Exception:
-                if not gdf_free.empty:
-                    gdf_free.plot(ax=ax, color="green", markersize=80, label="ML slobodna")
-                gdf_db.plot(ax=ax, color="blue", markersize=40, marker="s", label="DB mjesta")
-            ax.legend()
-            ax.set_axis_off()
-            ax.set_title("ML slobodna mjesta vs. DB parking mjesta")
-            st.pyplot(fig)
-            plt.close(fig)
-
-    # 5 ── sjoin_nearest: najblize DB mjesto svakom slobodnom ML mjstu
-    with st.expander("5. Nearest join – slobodna ML mjesta i DB mjesta"):
-        if db_spots.empty or gdf_free.empty:
-            st.info("Potrebni su slobodna ML mjesta i DB parking mjesta.")
-        else:
-            gdf_db = gpd.GeoDataFrame(
-                db_spots, geometry=gpd.points_from_xy(db_spots["lon"], db_spots["lat"]),
-                crs="EPSG:4326",
-            ).to_crs("EPSG:3857")
-            joined = gpd.sjoin_nearest(
-                gdf_free[["detection_id", "status", "geometry"]].copy(),
-                gdf_db[["spot_number", "status", "zone_name", "geometry"]].copy(),
-                how="left", distance_col="dist_m",
-                lsuffix="ml", rsuffix="db",
-            )
-            st.dataframe(
-                joined[["detection_id", "status_ml", "spot_number", "status_db",
-                         "zone_name", "dist_m"]]
-                .rename(columns={
-                    "detection_id": "ML ID",
-                    "status_ml":    "ML status",
-                    "spot_number":  "DB kôd mjesta",
-                    "status_db":    "DB status",
-                    "zone_name":    "Zona",
-                    "dist_m":       "Udaljenost (m)",
-                }),
-                use_container_width=True,
-            )
-
 # ── Glavna aplikacija ──────────────────────────────────────────────────────────
 
 def main():
@@ -417,9 +279,9 @@ def main():
         st.error(f"Greška pri kreiranju ML tabele: {e}")
         st.stop()
 
-    tab_detect, tab_edit, tab_df, tab_spatial = st.tabs([
+    tab_detect, tab_edit, tab_df = st.tabs([
         "📷 Detekcija", "✏️ Uredivanje atributa",
-        "📊 Pregled podataka", "🗺️ Prostorne analize",
+        "📊 Pregled podataka",
     ])
 
     # ── TAB 1: Detekcija ──────────────────────────────────────────────────────
@@ -620,11 +482,6 @@ def main():
             fmap = build_overview_map(df_v)
             st.subheader("Pregled zona na mapi")
             st_folium(fmap, width=800, height=470, returned_objects=[])
-
-    # ── TAB 4: Prostorne analize ───────────────────────────────────────────────
-    with tab_spatial:
-        run_spatial_analyses(load_detections(), load_db_spots())
-
 
 if __name__ == "__main__":
     main()

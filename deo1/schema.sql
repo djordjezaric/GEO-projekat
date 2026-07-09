@@ -1,4 +1,4 @@
--- Pametni sistem za upravljanje parking mestima -- Deo 1: relaciona sema
+-- RELACIONA SEMA
 CREATE EXTENSION IF NOT EXISTS postgis;
 
 DROP TABLE IF EXISTS sensor CASCADE;
@@ -9,7 +9,7 @@ DROP TABLE IF EXISTS driver CASCADE;
 DROP TABLE IF EXISTS parking_spot CASCADE;
 DROP TABLE IF EXISTS parking_zone CASCADE;
 
--- 1. Parking zona (npr. "Zeleni venac", "Slavija")
+--PARKING ZONA
 CREATE TABLE parking_zone (
     zone_id            SERIAL PRIMARY KEY,
     name                VARCHAR(100) NOT NULL,
@@ -21,7 +21,7 @@ CREATE TABLE parking_zone (
     created_at          TIMESTAMP NOT NULL DEFAULT now()
 );
 
--- 2. Parking mesto unutar zone (sadrzi i geo-lokaciju za Deo 2)
+-- PARKING MJESTO U ZONI
 CREATE TABLE parking_spot (
     spot_id         SERIAL PRIMARY KEY,
     zone_id         INTEGER NOT NULL REFERENCES parking_zone (zone_id) ON DELETE CASCADE,
@@ -35,7 +35,7 @@ CREATE TABLE parking_spot (
     UNIQUE (zone_id, spot_number)
 );
 
--- 3. Vozac
+-- VOZAC
 CREATE TABLE driver (
     driver_id           SERIAL PRIMARY KEY,
     first_name          VARCHAR(50) NOT NULL,
@@ -46,7 +46,7 @@ CREATE TABLE driver (
     registration_date   DATE NOT NULL DEFAULT CURRENT_DATE
 );
 
--- 4. Vozilo
+-- VOZILO
 CREATE TABLE vehicle (
     vehicle_id      SERIAL PRIMARY KEY,
     driver_id       INTEGER NOT NULL REFERENCES driver (driver_id) ON DELETE CASCADE,
@@ -58,7 +58,7 @@ CREATE TABLE vehicle (
                         CHECK (vehicle_type IN ('automobil', 'motocikl', 'kombi', 'elektricno'))
 );
 
--- 5. Sesija parkiranja (dolazak/odlazak vozila na konkretno mesto)
+--SESIJA
 CREATE TABLE parking_session (
     session_id      SERIAL PRIMARY KEY,
     spot_id         INTEGER NOT NULL REFERENCES parking_spot (spot_id) ON DELETE CASCADE,
@@ -70,7 +70,7 @@ CREATE TABLE parking_session (
     total_amount    NUMERIC(8, 2)
 );
 
--- 6. Placanje vezano za sesiju
+-- PLACANJE SESJIE
 CREATE TABLE payment (
     payment_id      SERIAL PRIMARY KEY,
     session_id      INTEGER NOT NULL REFERENCES parking_session (session_id) ON DELETE CASCADE,
@@ -81,7 +81,7 @@ CREATE TABLE payment (
     payment_time    TIMESTAMP NOT NULL DEFAULT now()
 );
 
--- 7. Senzor zauzetosti na parking mestu
+--SENZORI
 CREATE TABLE sensor (
     sensor_id           SERIAL PRIMARY KEY,
     spot_id             INTEGER NOT NULL UNIQUE REFERENCES parking_spot (spot_id) ON DELETE CASCADE,
