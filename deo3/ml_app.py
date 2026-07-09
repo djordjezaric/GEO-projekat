@@ -33,11 +33,11 @@ from ml_detect import detect_parking_availability
 # ── Parking zone – koordinate stvarnih parking lokacija ──────────────────────
 # Koordinate su centri parkinga (ne centri naselja)
 ZONES = {
-    "Liman 3 – Novi Sad":       {"lon": 19.8218, "lat": 45.2407, "capacity": 12},
-    "Zeleni Venac – Beograd":   {"lon": 20.4552, "lat": 44.8172, "capacity": 15},
-    "Slavija – Beograd":        {"lon": 20.4693, "lat": 44.8016, "capacity": 18},
-    "Centar – Niš":             {"lon": 21.8953, "lat": 43.3212, "capacity": 10},
-    "Petrovaradin – Novi Sad":  {"lon": 19.8634, "lat": 45.2516, "capacity": 8},
+    "Liman 3 – Novi Sad":       {"lon": 19.8218, "lat": 45.2407, "capacity": 50},
+    "Zeleni Venac – Beograd":   {"lon": 20.4552, "lat": 44.8172, "capacity": 80},
+    "Slavija – Beograd":        {"lon": 20.4693, "lat": 44.8016, "capacity": 120},
+    "Centar – Niš":             {"lon": 21.8953, "lat": 43.3212, "capacity": 60},
+    "Petrovaradin – Novi Sad":  {"lon": 19.8634, "lat": 45.2516, "capacity": 30},
 }
 
 # ── Baza ──────────────────────────────────────────────────────────────────────
@@ -338,6 +338,24 @@ def main():
             c2.metric("Slobodna mjesta", n_free,
                       help="Kapacitet zone − detektovana vozila")
             c3.metric("Popunjenost",     f"{n_veh/max(total,1)*100:.0f}%")
+
+            # Statusna poruka po popunjenosti
+            pct_free = n_free / max(total, 1)
+            if pct_free < 0.15:
+                st.error(
+                    "🔴 **Kritično popunjeno!** "
+                    "Dok dođete, vjerovatno neće više biti slobodnih mjesta."
+                )
+            elif pct_free < 0.50:
+                st.warning(
+                    "🟠 **Parking srednje popunjen.** "
+                    "Ima slobodnih mjesta, ali požurite!"
+                )
+            else:
+                st.success(
+                    "🟢 **Parking ima dosta slobodnih mjesta.** "
+                    "Slobodno se uputite."
+                )
 
             # Anotirana slika – ograničena visina da ne zauzima cijeli ekran
             ann_rgb = cv2.cvtColor(result["annotated"], cv2.COLOR_BGR2RGB)
